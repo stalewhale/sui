@@ -6,6 +6,7 @@ use std::str::FromStr;
 
 use anyhow::{anyhow, Error};
 use base64ct::Encoding;
+use bip32::{ChildNumber, DerivationPath, XPrv};
 use digest::Digest;
 use fastcrypto::ed25519::{
     Ed25519AggregateSignature, Ed25519KeyPair, Ed25519PrivateKey, Ed25519PublicKey,
@@ -28,6 +29,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, Bytes};
 use sha3::Sha3_256;
 use signature::Signer;
+use slip10_ed25519::derive_ed25519_private_key;
 
 use crate::base_types::{AuthorityName, SuiAddress};
 use crate::committee::{Committee, EpochId};
@@ -476,6 +478,88 @@ where
 {
     let kp = KP::generate(csprng);
     (kp.public().into(), kp)
+}
+
+/// Ed25519 follows SLIP-0010 using hardened path: m/44'/784'/0'/0'/{index}'
+/// Secp256k1 follows BIP-32 using path where the first 3 levels are hardened: m/54'/784'/0'/0/{index}
+/// Note that the purpose for Secp256k1 is registered as 54, to differentiate from Ed25519 with purpose 44.
+pub fn derive_key_pair_from_path(
+    seed: &[u8],
+    derivation_path: Option<DerivationPath>,
+    key_scheme: &SignatureScheme,
+) -> Result<(SuiAddress, SuiKeyPair), SuiError> {
+    let path = validate_path(key_scheme, derivation_path)?;
+    match key_scheme {
+        SignatureScheme::ED25519 => {
+            let indexes = path.into_iter().map(|i| i.into()).collect::<Vec<_>>();
+            let derived = derive_ed25519_private_key(seed, &indexes);
+            let sk = Ed25519PrivateKey::from_bytes(&derived)
+                .map_err(|e| SuiError::SignatureKeyGenError(e.to_string()))?;
+            let kp = Ed25519KeyPair::from(sk);
+            Ok((kp.public().into(), SuiKeyPair::Ed25519SuiKeyPair(kp)))
+        }
+        SignatureScheme::Secp256k1 => {
+            let child_xprv = XPrv::derive_from_path(&seed, &path)
+                .map_err(|e| SuiError::SignatureKeyGenError(e.to_string()))?;
+            let kp = Secp256k1KeyPair::from(
+                Secp256k1PrivateKey::from_bytes(child_xprv.private_key().to_bytes().as_slice())
+                    .unwrap(),
+            );
+            Ok((kp.public().into(), SuiKeyPair::Secp256k1SuiKeyPair(kp)))
+        }
+    }
+}
+
+pub fn validate_path(
+    key_scheme: &SignatureScheme,
+    path: Option<DerivationPath>,
+) -> Result<DerivationPath, SuiError> {
+    match key_scheme {
+        SignatureScheme::ED25519 => {
+            match path {
+                Some(p) => {
+                    // The derivation path must be hardened at all levels with purpose = 44, coin_type = 784
+                    if let &[purpose, coin_type, account, change, address] = p.as_ref() {
+                        if purpose == ChildNumber::new(44, true).unwrap()
+                            && coin_type == ChildNumber::new(784, true).unwrap()
+                            && account.is_hardened()
+                            && change.is_hardened()
+                            && address.is_hardened()
+                        {
+                            Ok(p)
+                        } else {
+                            Err(SuiError::SignatureKeyGenError("Invalid path".to_string()))
+                        }
+                    } else {
+                        Err(SuiError::SignatureKeyGenError("Invalid path".to_string()))
+                    }
+                }
+                None => Ok("m/44'/784'/0'/0'/0'".parse().unwrap()),
+            }
+        }
+        SignatureScheme::Secp256k1 => {
+            match path {
+                Some(p) => {
+                    // The derivation path must be hardened at first 3 levels with purpose = 54, coin_type = 784
+                    if let &[purpose, coin_type, account, change, address] = p.as_ref() {
+                        if purpose == ChildNumber::new(54, true).unwrap()
+                            && coin_type == ChildNumber::new(784, true).unwrap()
+                            && account.is_hardened()
+                            && !change.is_hardened()
+                            && !address.is_hardened()
+                        {
+                            Ok(p)
+                        } else {
+                            Err(SuiError::SignatureKeyGenError("Invalid path".to_string()))
+                        }
+                    } else {
+                        Err(SuiError::SignatureKeyGenError("Invalid path".to_string()))
+                    }
+                }
+                None => Ok("m/54'/784'/0'/0/0".parse().unwrap()),
+            }
+        }
+    }
 }
 
 /// Wrapper function to return SuiKeypair based on key scheme string with seedable rng.

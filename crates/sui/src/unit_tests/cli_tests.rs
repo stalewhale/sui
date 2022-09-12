@@ -768,6 +768,7 @@ async fn test_switch_command() -> Result<(), anyhow::Error> {
     // Create a new address
     let os = SuiClientCommands::NewAddress {
         key_scheme: SignatureScheme::ED25519,
+        derivation_path: None,
     }
     .execute(&mut context)
     .await?;
@@ -821,6 +822,7 @@ async fn test_new_address_command_by_flag() -> Result<(), anyhow::Error> {
 
     SuiClientCommands::NewAddress {
         key_scheme: SignatureScheme::Secp256k1,
+        derivation_path: None,
     }
     .execute(&mut context)
     .await?;
